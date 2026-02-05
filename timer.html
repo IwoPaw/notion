@@ -1,0 +1,130 @@
+//nie moje (czarta)
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Timed Redirect</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; max-width: 720px; }
+    label { display:block; margin: 1rem 0 0.25rem; font-weight: 600; }
+    input { width: 100%; padding: 0.6rem; font-size: 1rem; }
+    .row { display:flex; gap: 0.75rem; margin-top: 1rem; }
+    button { padding: 0.7rem 1rem; font-size: 1rem; cursor: pointer; }
+    #status { margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border-radius: 8px; }
+    small { color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Open a site after N minutes</h1>
+
+  <label for="url">Site address (URL)</label>
+  <input id="url" type="url" placeholder="https://example.com" required />
+
+  <label for="minutes">Time (minutes)</label>
+  <input id="minutes" type="number" min="0.1" step="0.1" placeholder="e.g., 5" required />
+
+  <div class="row">
+    <button id="startBtn">Start</button>
+    <button id="cancelBtn" disabled>Cancel</button>
+  </div>
+
+  <div id="status">
+    <div><strong>Status:</strong> <span id="statusText">Idle</span></div>
+    <div><small id="countdown"></small></div>
+  </div>
+
+  <script>
+    let timeoutId = null;
+    let intervalId = null;
+    let endTimeMs = 0;
+
+    const urlEl = document.getElementById("url");
+    const minutesEl = document.getElementById("minutes");
+    const startBtn = document.getElementById("startBtn");
+    const cancelBtn = document.getElementById("cancelBtn");
+    const statusText = document.getElementById("statusText");
+    const countdown = document.getElementById("countdown");
+
+    function normalizeUrl(raw) {
+      const trimmed = (raw || "").trim();
+      if (!trimmed) return "";
+      // If user forgets https://, add it.
+      if (!/^https?:\/\//i.test(trimmed)) return "https://" + trimmed;
+      return trimmed;
+    }
+
+    function setIdle() {
+      statusText.textContent = "Idle";
+      countdown.textContent = "";
+      cancelBtn.disabled = true;
+      startBtn.disabled = false;
+      clearTimers();
+    }
+
+    function clearTimers() {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (intervalId) clearInterval(intervalId);
+      timeoutId = null;
+      intervalId = null;
+    }
+
+    function formatRemaining(ms) {
+      const totalSec = Math.max(0, Math.ceil(ms / 1000));
+      const m = Math.floor(totalSec / 60);
+      const s = totalSec % 60;
+      return `${m}:${String(s).padStart(2, "0")}`;
+    }
+
+    startBtn.addEventListener("click", () => {
+      clearTimers();
+
+      const url = normalizeUrl(urlEl.value);
+      const minutes = Number(minutesEl.value);
+
+      if (!url) {
+        alert("Please enter a website address.");
+        return;
+      }
+      if (!Number.isFinite(minutes) || minutes <= 0) {
+        alert("Please enter a number of minutes greater than 0.");
+        return;
+      }
+
+      const delayMs = minutes * 60 * 1000;
+      endTimeMs = Date.now() + delayMs;
+
+      statusText.textContent = `Scheduled to open: ${url}`;
+      cancelBtn.disabled = false;
+      startBtn.disabled = true;
+
+      // Update countdown every 250ms
+      intervalId = setInterval(() => {
+        const remaining = endTimeMs - Date.now();
+        countdown.textContent = `Opening in ${formatRemaining(remaining)} (mm:ss)`;
+      }, 250);
+
+      timeoutId = setTimeout(() => {
+        clearTimers();
+        statusText.textContent = `Opening now: ${url}`;
+        countdown.textContent = "";
+
+        // Option A: Redirect the current tab:
+        window.location.href = url;
+
+        // Option B (if you prefer opening a new tab/window instead), use:
+        // window.open(url, "_blank", "noopener,noreferrer");
+        // setIdle();
+      }, delayMs);
+    });
+
+    cancelBtn.addEventListener("click", () => {
+      setIdle();
+    });
+
+    // Start in idle state
+    setIdle();
+  </script>
+</body>
+</html>
