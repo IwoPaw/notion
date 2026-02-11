@@ -3,32 +3,35 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Play Media After Time</title>
+  <title>Play Stream After Time (HLS/DASH)</title>
   <style>
-    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; max-width: 820px; }
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; max-width: 900px; }
     label { display:block; margin: 1rem 0 0.25rem; font-weight: 600; }
     input { width: 100%; padding: 0.6rem; font-size: 1rem; }
     button { padding: 0.7rem 1rem; font-size: 1rem; cursor: pointer; }
     .row { display:flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap; align-items: center; }
     #status { margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border-radius: 8px; }
     small { color:#555; }
-    audio, video { width: 100%; margin-top: 1rem; }
+    video { width: 100%; margin-top: 1rem; background: #000; }
+    code { background:#eee; padding: 0.1rem 0.25rem; border-radius: 4px; }
   </style>
+
+  <!-- HLS.js for .m3u8 in Chrome/Firefox/Edge -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <!-- dash.js for .mpd -->
+  <script src="https://cdn.jsdelivr.net/npm/dashjs@latest/dist/dash.all.min.js"></script>
 </head>
 <body>
-  <h1>Play a file from a URL after N minutes</h1>
+  <h1>Play a stream after N minutes</h1>
 
-  <label for="mediaUrl">Media file URL (direct link)</label>
-  <input id="mediaUrl" type="url" placeholder="https://example.com/sound.mp3 or video.mp4" required />
+  <label for="streamUrl">Stream URL (HLS .m3u8 / DASH .mpd / MP4 / MP3)</label>
+  <input id="streamUrl" type="url" placeholder="https://.../master.m3u8" required />
   <small>
-    Must be a direct media URL, not a normal webpage. (YouTube pages, etc. won’t work here.)
+    If this is HLS (<code>.m3u8</code>), Chrome/Firefox need HLS.js (included). If it’s DASH (<code>.mpd</code>), we use dash.js (included).
   </small>
 
   <label for="minutes">Time (minutes)</label>
   <input id="minutes" type="number" min="0.01" step="0.01" placeholder="e.g., 2" required />
-
-  <label for="redirectUrl">Optional: open this site after playback starts</label>
-  <input id="redirectUrl" type="url" placeholder="https://example.com (leave empty for no redirect)" />
 
   <div class="row">
     <button id="startBtn">Start</button>
@@ -38,34 +41,33 @@
   <div id="status">
     <div><strong>Status:</strong> <span id="statusText">Idle</span></div>
     <div><small id="countdown"></small></div>
+    <div><small id="hint"></small></div>
   </div>
 
-  <!-- We’ll use one of these depending on the file type -->
-  <audio id="audioEl" controls style="display:none"></audio>
-  <video id="videoEl" controls style="display:none"></video>
+  <video id="player" controls playsinline></video>
 
   <script>
     let timeoutId = null;
     let intervalId = null;
     let endTimeMs = 0;
 
-    const mediaUrlEl = document.getElementById("mediaUrl");
-    const minutesEl = document.getElementById("minutes");
-    const redirectUrlEl = document.getElementById("redirectUrl");
+    let hls = null;
+    let dashPlayer = null;
 
+    const streamUrlEl = document.getElementById("streamUrl");
+    const minutesEl = document.getElementById("minutes");
     const startBtn = document.getElementById("startBtn");
     const cancelBtn = document.getElementById("cancelBtn");
     const statusText = document.getElementById("statusText");
     const countdown = document.getElementById("countdown");
-
-    const audioEl = document.getElementById("audioEl");
-    const videoEl = document.getElementById("videoEl");
+    const hint = document.getElementById("hint");
+    const video = document.getElementById("player");
 
     function normalizeUrl(raw) {
-      const trimmed = (raw || "").trim();
-      if (!trimmed) return "";
-      if (!/^https?:\/\//i.test(trimmed)) return "https://" + trimmed;
-      return trimmed;
+      const t = (raw || "").trim();
+      if (!t) return "";
+      if (!/^https?:\/\//i.test(t)) return "https://" + t;
+      return t;
     }
 
     function clearTimers() {
@@ -75,20 +77,30 @@
       intervalId = null;
     }
 
-    function resetPlayer() {
-      audioEl.pause(); videoEl.pause();
-      audioEl.removeAttribute("src");
-      videoEl.removeAttribute("src");
-      audioEl.style.display = "none";
-      videoEl.style.display = "none";
-      audioEl.load(); videoEl.load();
+    function resetEngines() {
+      // stop playback
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+
+      // destroy hls.js
+      if (hls) {
+        try { hls.destroy(); } catch {}
+        hls = null;
+      }
+      // destroy dash.js
+      if (dashPlayer) {
+        try { dashPlayer.reset(); } catch {}
+        dashPlayer = null;
+      }
     }
 
     function setIdle() {
       clearTimers();
-      resetPlayer();
+      resetEngines();
       statusText.textContent = "Idle";
       countdown.textContent = "";
+      hint.textContent = "";
       startBtn.disabled = false;
       cancelBtn.disabled = true;
     }
@@ -100,61 +112,93 @@
       return `${m}:${String(s).padStart(2, "0")}`;
     }
 
-    function pickPlayer(url) {
-      // crude detection by extension; works well enough for common cases
+    function classify(url) {
       const u = url.toLowerCase().split("?")[0].split("#")[0];
-      const isVideo = /\.(mp4|webm|ogg|mov|m4v)$/i.test(u);
-      const isAudio = /\.(mp3|wav|aac|m4a|flac|oga|opus)$/i.test(u);
-
-      if (isVideo) return { el: videoEl, kind: "video" };
-      if (isAudio) return { el: audioEl, kind: "audio" };
-
-      // Unknown: try audio first (many servers don’t have extensions)
-      return { el: audioEl, kind: "audio" };
+      if (u.endsWith(".m3u8")) return "hls";
+      if (u.endsWith(".mpd")) return "dash";
+      if (/\.(mp4|webm|ogg|mov|m4v)$/i.test(u)) return "video";
+      if (/\.(mp3|wav|aac|m4a|flac|oga|opus)$/i.test(u)) return "audio";
+      return "unknown";
     }
 
-    async function playMedia(url) {
-      resetPlayer();
-      const { el, kind } = pickPlayer(url);
-
-      el.src = url;
-      el.crossOrigin = "anonymous"; // may or may not be honored by server
-      el.preload = "auto";
-      el.style.display = "block";
-
-      statusText.textContent = `Loading ${kind}: ${url}`;
-
-      // Wait until it can start (or fails)
-      await new Promise((resolve, reject) => {
-        const onReady = () => { cleanup(); resolve(); };
-        const onErr = () => { cleanup(); reject(new Error("Failed to load media.")); };
-        const cleanup = () => {
-          el.removeEventListener("canplay", onReady);
-          el.removeEventListener("error", onErr);
-        };
-        el.addEventListener("canplay", onReady, { once: true });
-        el.addEventListener("error", onErr, { once: true });
-        el.load();
-      });
-
-      // Try autoplay
+    async function tryPlay() {
       try {
-        await el.play();
-        statusText.textContent = `Playing ${kind} now.`;
+        await video.play();
+        hint.textContent = "";
       } catch (e) {
-        statusText.textContent =
-          "Autoplay was blocked by the browser. Click Play on the player to start.";
+        hint.textContent = "Autoplay blocked. Click the play button on the player.";
       }
     }
 
-    startBtn.addEventListener("click", () => {
+    function attachHLS(url) {
+      // Safari can often do HLS without hls.js
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = url;
+        return;
+      }
+      if (!window.Hls || !Hls.isSupported()) {
+        throw new Error("HLS not supported in this browser (and Hls.js not available).");
+      }
+      hls = new Hls({
+        // If CORS is an issue, this still won’t bypass it — but we can surface errors.
+        // You can tweak lowLatencyMode if needed:
+        // lowLatencyMode: true
+      });
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        // Helpful diagnostics
+        console.error("HLS error:", data);
+        statusText.textContent = "HLS error: " + (data?.details || data?.type || "unknown");
+        hint.textContent = "Common cause: CORS blocked playlist/segments, or URL needs cookies/auth.";
+      });
+      hls.loadSource(url);
+      hls.attachMedia(video);
+    }
+
+    function attachDASH(url) {
+      if (!window.dashjs) throw new Error("dash.js not available.");
+      dashPlayer = dashjs.MediaPlayer().create();
+      dashPlayer.on("error", (e) => {
+        console.error("DASH error:", e);
+        statusText.textContent = "DASH error (see console)";
+        hint.textContent = "Common cause: CORS blocked manifest/segments, or URL needs cookies/auth.";
+      });
+      dashPlayer.initialize(video, url, false);
+    }
+
+    async function playStream(url) {
+      resetEngines();
+
+      const kind = classify(url);
+      statusText.textContent = `Loading (${kind}): ${url}`;
+      hint.textContent = "";
+
+      // Important: many servers require HTTPS + correct CORS headers
+      // We can only set crossOrigin for decoders; it won't bypass CORS on playlists/segments.
+      video.crossOrigin = "anonymous";
+
+      if (kind === "hls") {
+        attachHLS(url);
+      } else if (kind === "dash") {
+        attachDASH(url);
+      } else {
+        // normal direct media
+        video.src = url;
+      }
+
+      // Wait a bit for manifest attach
+      await new Promise(r => setTimeout(r, 300));
+      statusText.textContent = "Attempting playback…";
+      await tryPlay();
+      statusText.textContent = "Playing (or ready).";
+    }
+
+    startBtn.addEventListener("click", async () => {
       clearTimers();
 
-      const mediaUrl = normalizeUrl(mediaUrlEl.value);
+      const url = normalizeUrl(streamUrlEl.value);
       const minutes = Number(minutesEl.value);
-      const redirectUrl = normalizeUrl(redirectUrlEl.value);
 
-      if (!mediaUrl) return alert("Enter a media file URL.");
+      if (!url) return alert("Enter a stream URL.");
       if (!Number.isFinite(minutes) || minutes <= 0) return alert("Enter minutes > 0.");
 
       const delayMs = minutes * 60 * 1000;
@@ -162,12 +206,13 @@
 
       startBtn.disabled = true;
       cancelBtn.disabled = false;
-      statusText.textContent = `Scheduled: will play ${mediaUrl}`;
+
+      statusText.textContent = `Scheduled: will play after ${minutes} min`;
+      hint.textContent = "";
       countdown.textContent = "";
 
       intervalId = setInterval(() => {
-        const remaining = endTimeMs - Date.now();
-        countdown.textContent = `Starting in ${formatRemaining(remaining)} (mm:ss)`;
+        countdown.textContent = `Starting in ${formatRemaining(endTimeMs - Date.now())} (mm:ss)`;
       }, 250);
 
       timeoutId = setTimeout(async () => {
@@ -175,34 +220,19 @@
         countdown.textContent = "";
 
         try {
-          await playMedia(mediaUrl);
-        } catch (err) {
-          statusText.textContent = "Could not load/play that URL. It may not be a direct media file.";
-          console.error(err);
+          await playStream(url);
+        } catch (e) {
+          console.error(e);
+          statusText.textContent = "Failed to start: " + (e?.message || "unknown error");
+          hint.textContent =
+            "If this is HLS/DASH, CORS or auth is the #1 cause. Also try running from an HTTPS server (not file://).";
           startBtn.disabled = false;
           cancelBtn.disabled = true;
-          return;
         }
-
-        // Optional redirect after playback starts
-        if (redirectUrl) {
-          setTimeout(() => {
-            window.location.href = redirectUrl;
-          }, 800);
-        }
-
-        // Re-enable cancel as "Stop"
-        cancelBtn.textContent = "Stop";
       }, delayMs);
     });
 
-    cancelBtn.addEventListener("click", () => {
-      // If playing, stop; otherwise cancel
-      clearTimers();
-      resetPlayer();
-      cancelBtn.textContent = "Cancel";
-      setIdle();
-    });
+    cancelBtn.addEventListener("click", setIdle);
 
     setIdle();
   </script>
