@@ -3,32 +3,32 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Timed Redirect + Play Media</title>
+  <title>Play Media After Time</title>
   <style>
-    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; max-width: 760px; }
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; max-width: 820px; }
     label { display:block; margin: 1rem 0 0.25rem; font-weight: 600; }
     input { width: 100%; padding: 0.6rem; font-size: 1rem; }
-    .row { display:flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap; }
     button { padding: 0.7rem 1rem; font-size: 1rem; cursor: pointer; }
+    .row { display:flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap; align-items: center; }
     #status { margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border-radius: 8px; }
-    small { color: #555; }
-    audio, video { width: 100%; margin-top: 0.75rem; }
+    small { color:#555; }
+    audio, video { width: 100%; margin-top: 1rem; }
   </style>
 </head>
 <body>
-  <h1>Open a site after N minutes (and play media)</h1>
+  <h1>Play a file from a URL after N minutes</h1>
 
-  <label for="url">Site address (URL)</label>
-  <input id="url" type="url" placeholder="https://example.com" required />
+  <label for="mediaUrl">Media file URL (direct link)</label>
+  <input id="mediaUrl" type="url" placeholder="https://example.com/sound.mp3 or video.mp4" required />
+  <small>
+    Must be a direct media URL, not a normal webpage. (YouTube pages, etc. won’t work here.)
+  </small>
 
   <label for="minutes">Time (minutes)</label>
-  <input id="minutes" type="number" min="0.1" step="0.1" placeholder="e.g., 5" required />
+  <input id="minutes" type="number" min="0.01" step="0.01" placeholder="e.g., 2" required />
 
-  <label for="mediaFile">Optional: choose a sound/video to play when time is up</label>
-  <input id="mediaFile" type="file" accept="audio/*,video/*" />
-  <small>
-    This plays on <em>this</em> page at the end (reliable). Autoplay on the target site cannot be guaranteed.
-  </small>
+  <label for="redirectUrl">Optional: open this site after playback starts</label>
+  <input id="redirectUrl" type="url" placeholder="https://example.com (leave empty for no redirect)" />
 
   <div class="row">
     <button id="startBtn">Start</button>
@@ -40,7 +40,7 @@
     <div><small id="countdown"></small></div>
   </div>
 
-  <!-- Hidden until needed -->
+  <!-- We’ll use one of these depending on the file type -->
   <audio id="audioEl" controls style="display:none"></audio>
   <video id="videoEl" controls style="display:none"></video>
 
@@ -48,15 +48,16 @@
     let timeoutId = null;
     let intervalId = null;
     let endTimeMs = 0;
-    let objectUrl = null;
 
-    const urlEl = document.getElementById("url");
+    const mediaUrlEl = document.getElementById("mediaUrl");
     const minutesEl = document.getElementById("minutes");
-    const mediaFileEl = document.getElementById("mediaFile");
+    const redirectUrlEl = document.getElementById("redirectUrl");
+
     const startBtn = document.getElementById("startBtn");
     const cancelBtn = document.getElementById("cancelBtn");
     const statusText = document.getElementById("statusText");
     const countdown = document.getElementById("countdown");
+
     const audioEl = document.getElementById("audioEl");
     const videoEl = document.getElementById("videoEl");
 
@@ -74,23 +75,22 @@
       intervalId = null;
     }
 
-    function cleanupMedia() {
+    function resetPlayer() {
       audioEl.pause(); videoEl.pause();
       audioEl.removeAttribute("src");
       videoEl.removeAttribute("src");
       audioEl.style.display = "none";
       videoEl.style.display = "none";
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      objectUrl = null;
+      audioEl.load(); videoEl.load();
     }
 
     function setIdle() {
+      clearTimers();
+      resetPlayer();
       statusText.textContent = "Idle";
       countdown.textContent = "";
-      cancelBtn.disabled = true;
       startBtn.disabled = false;
-      clearTimers();
-      cleanupMedia();
+      cancelBtn.disabled = true;
     }
 
     function formatRemaining(ms) {
@@ -100,66 +100,109 @@
       return `${m}:${String(s).padStart(2, "0")}`;
     }
 
-    async function playSelectedMediaIfAny() {
-      const file = mediaFileEl.files && mediaFileEl.files[0];
-      if (!file) return;
+    function pickPlayer(url) {
+      // crude detection by extension; works well enough for common cases
+      const u = url.toLowerCase().split("?")[0].split("#")[0];
+      const isVideo = /\.(mp4|webm|ogg|mov|m4v)$/i.test(u);
+      const isAudio = /\.(mp3|wav|aac|m4a|flac|oga|opus)$/i.test(u);
 
-      cleanupMedia();
-      objectUrl = URL.createObjectURL(file);
+      if (isVideo) return { el: videoEl, kind: "video" };
+      if (isAudio) return { el: audioEl, kind: "audio" };
 
-      const isVideo = file.type.startsWith("video/");
-      const el = isVideo ? videoEl : audioEl;
+      // Unknown: try audio first (many servers don’t have extensions)
+      return { el: audioEl, kind: "audio" };
+    }
 
-      el.src = objectUrl;
+    async function playMedia(url) {
+      resetPlayer();
+      const { el, kind } = pickPlayer(url);
+
+      el.src = url;
+      el.crossOrigin = "anonymous"; // may or may not be honored by server
+      el.preload = "auto";
       el.style.display = "block";
 
-      // Try to play. Because the user clicked Start, this usually works.
+      statusText.textContent = `Loading ${kind}: ${url}`;
+
+      // Wait until it can start (or fails)
+      await new Promise((resolve, reject) => {
+        const onReady = () => { cleanup(); resolve(); };
+        const onErr = () => { cleanup(); reject(new Error("Failed to load media.")); };
+        const cleanup = () => {
+          el.removeEventListener("canplay", onReady);
+          el.removeEventListener("error", onErr);
+        };
+        el.addEventListener("canplay", onReady, { once: true });
+        el.addEventListener("error", onErr, { once: true });
+        el.load();
+      });
+
+      // Try autoplay
       try {
-        el.currentTime = 0;
         await el.play();
-      } catch (err) {
-        // If blocked, user can press play manually.
-        statusText.textContent = "Media autoplay was blocked — press play to start it.";
+        statusText.textContent = `Playing ${kind} now.`;
+      } catch (e) {
+        statusText.textContent =
+          "Autoplay was blocked by the browser. Click Play on the player to start.";
       }
     }
 
     startBtn.addEventListener("click", () => {
       clearTimers();
 
-      const url = normalizeUrl(urlEl.value);
+      const mediaUrl = normalizeUrl(mediaUrlEl.value);
       const minutes = Number(minutesEl.value);
+      const redirectUrl = normalizeUrl(redirectUrlEl.value);
 
-      if (!url) return alert("Please enter a website address.");
-      if (!Number.isFinite(minutes) || minutes <= 0) return alert("Please enter minutes > 0.");
+      if (!mediaUrl) return alert("Enter a media file URL.");
+      if (!Number.isFinite(minutes) || minutes <= 0) return alert("Enter minutes > 0.");
 
       const delayMs = minutes * 60 * 1000;
       endTimeMs = Date.now() + delayMs;
 
-      statusText.textContent = `Scheduled to open: ${url}`;
-      cancelBtn.disabled = false;
       startBtn.disabled = true;
+      cancelBtn.disabled = false;
+      statusText.textContent = `Scheduled: will play ${mediaUrl}`;
+      countdown.textContent = "";
 
       intervalId = setInterval(() => {
         const remaining = endTimeMs - Date.now();
-        countdown.textContent = `Opening in ${formatRemaining(remaining)} (mm:ss)`;
+        countdown.textContent = `Starting in ${formatRemaining(remaining)} (mm:ss)`;
       }, 250);
 
       timeoutId = setTimeout(async () => {
         clearTimers();
-        statusText.textContent = `Time's up — playing media (if selected) and opening: ${url}`;
         countdown.textContent = "";
 
-        // Play your chosen media on THIS page (reliable).
-        await playSelectedMediaIfAny();
+        try {
+          await playMedia(mediaUrl);
+        } catch (err) {
+          statusText.textContent = "Could not load/play that URL. It may not be a direct media file.";
+          console.error(err);
+          startBtn.disabled = false;
+          cancelBtn.disabled = true;
+          return;
+        }
 
-        // Give the media a moment to start, then redirect.
-        setTimeout(() => {
-          window.location.href = url;
-        }, 800);
+        // Optional redirect after playback starts
+        if (redirectUrl) {
+          setTimeout(() => {
+            window.location.href = redirectUrl;
+          }, 800);
+        }
+
+        // Re-enable cancel as "Stop"
+        cancelBtn.textContent = "Stop";
       }, delayMs);
     });
 
-    cancelBtn.addEventListener("click", setIdle);
+    cancelBtn.addEventListener("click", () => {
+      // If playing, stop; otherwise cancel
+      clearTimers();
+      resetPlayer();
+      cancelBtn.textContent = "Cancel";
+      setIdle();
+    });
 
     setIdle();
   </script>
