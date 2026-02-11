@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Timed Redirect + Play Media</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; max-width: 760px; }
+    label { display:block; margin: 1rem 0 0.25rem; font-weight: 600; }
+    input { width: 100%; padding: 0.6rem; font-size: 1rem; }
+    .row { display:flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap; }
+    button { padding: 0.7rem 1rem; font-size: 1rem; cursor: pointer; }
+    #status { margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border-radius: 8px; }
+    small { color: #555; }
+    audio, video { width: 100%; margin-top: 0.75rem; }
+  </style>
+</head>
+<body>
+  <h1>Open a site after N minutes (and play media)</h1>
+
+  <label for="url">Site address (URL)</label>
+  <input id="url" type="url" placeholder="https://example.com" required />
+
+  <label for="minutes">Time (minutes)</label>
+  <input id="minutes" type="number" min="0.1" step="0.1" placeholder="e.g., 5" required />
+
+  <label for="mediaFile">Optional: choose a sound/video to play when time is up</label>
+  <input id="mediaFile" type="file" accept="audio/*,video/*" />
+  <small>
+    This plays on <em>this</em> page at the end (reliable). Autoplay on the target site cannot be guaranteed.
+  </small>
+
+  <div class="row">
+    <button id="startBtn">Start</button>
+    <button id="cancelBtn" disabled>Cancel</button>
+  </div>
+
+  <div id="status">
+    <div><strong>Status:</strong> <span id="statusText">Idle</span></div>
+    <div><small id="countdown"></small></div>
+  </div>
+
+  <!-- Hidden until needed -->
+  <audio id="audioEl" controls style="display:none"></audio>
+  <video id="videoEl" controls style="display:none"></video>
+
+  <script>
+    let timeoutId = null;
+    let intervalId = null;
+    let endTimeMs = 0;
+    let objectUrl = null;
+
+    const urlEl = document.getElementById("url");
+    const minutesEl = document.getElementById("minutes");
+    const mediaFileEl = document.getElementById("mediaFile");
+    const startBtn = document.getElementById("startBtn");
+    const cancelBtn = document.getElementById("cancelBtn");
+    const statusText = document.getElementById("statusText");
+    const countdown = document.getElementById("countdown");
+    const audioEl = document.getElementById("audioEl");
+    const videoEl = document.getElementById("videoEl");
+
+    function normalizeUrl(raw) {
+      const trimmed = (raw || "").trim();
+      if (!trimmed) return "";
+      if (!/^https?:\/\//i.test(trimmed)) return "https://" + trimmed;
+      return trimmed;
+    }
+
+    function clearTimers() {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (intervalId) clearInterval(intervalId);
+      timeoutId = null;
+      intervalId = null;
+    }
+
+    function cleanupMedia() {
+      audioEl.pause(); videoEl.pause();
+      audioEl.removeAttribute("src");
+      videoEl.removeAttribute("src");
+      audioEl.style.display = "none";
+      videoEl.style.display = "none";
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = null;
+    }
+
+    function setIdle() {
+      statusText.textContent = "Idle";
+      countdown.textContent = "";
+      cancelBtn.disabled = true;
+      startBtn.disabled = false;
+      clearTimers();
+      cleanupMedia();
+    }
+
+    function formatRemaining(ms) {
+      const totalSec = Math.max(0, Math.ceil(ms / 1000));
+      const m = Math.floor(totalSec / 60);
+      const s = totalSec % 60;
+      return `${m}:${String(s).padStart(2, "0")}`;
+    }
+
+    async function playSelectedMediaIfAny() {
+      const file = mediaFileEl.files && mediaFileEl.files[0];
+      if (!file) return;
+
+      cleanupMedia();
+      objectUrl = URL.createObjectURL(file);
+
+      const isVideo = file.type.startsWith("video/");
+      const el = isVideo ? videoEl : audioEl;
+
+      el.src = objectUrl;
+      el.style.display = "block";
+
+      // Try to play. Because the user clicked Start, this usually works.
+      try {
+        el.currentTime = 0;
+        await el.play();
+      } catch (err) {
+        // If blocked, user can press play manually.
+        statusText.textContent = "Media autoplay was blocked — press play to start it.";
+      }
+    }
+
+    startBtn.addEventListener("click", () => {
+      clearTimers();
+
+      const url = normalizeUrl(urlEl.value);
+      const minutes = Number(minutesEl.value);
+
+      if (!url) return alert("Please enter a website address.");
+      if (!Number.isFinite(minutes) || minutes <= 0) return alert("Please enter minutes > 0.");
+
+      const delayMs = minutes * 60 * 1000;
+      endTimeMs = Date.now() + delayMs;
+
+      statusText.textContent = `Scheduled to open: ${url}`;
+      cancelBtn.disabled = false;
+      startBtn.disabled = true;
+
+      intervalId = setInterval(() => {
+        const remaining = endTimeMs - Date.now();
+        countdown.textContent = `Opening in ${formatRemaining(remaining)} (mm:ss)`;
+      }, 250);
+
+      timeoutId = setTimeout(async () => {
+        clearTimers();
+        statusText.textContent = `Time's up — playing media (if selected) and opening: ${url}`;
+        countdown.textContent = "";
+
+        // Play your chosen media on THIS page (reliable).
+        await playSelectedMediaIfAny();
+
+        // Give the media a moment to start, then redirect.
+        setTimeout(() => {
+          window.location.href = url;
+        }, 800);
+      }, delayMs);
+    });
+
+    cancelBtn.addEventListener("click", setIdle);
+
+    setIdle();
+  </script>
+</body>
+</html>
