@@ -1,240 +1,129 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Play Stream After Time (HLS/DASH)</title>
-  <style>
-    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; max-width: 900px; }
-    label { display:block; margin: 1rem 0 0.25rem; font-weight: 600; }
-    input { width: 100%; padding: 0.6rem; font-size: 1rem; }
-    button { padding: 0.7rem 1rem; font-size: 1rem; cursor: pointer; }
-    .row { display:flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap; align-items: center; }
-    #status { margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border-radius: 8px; }
-    small { color:#555; }
-    video { width: 100%; margin-top: 1rem; background: #000; }
-    code { background:#eee; padding: 0.1rem 0.25rem; border-radius: 4px; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Delayed Page Audio Player</title>
 
-  <!-- HLS.js for .m3u8 in Chrome/Firefox/Edge -->
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <!-- dash.js for .mpd -->
-  <script src="https://cdn.jsdelivr.net/npm/dashjs@latest/dist/dash.all.min.js"></script>
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background: #121212;
+    color: white;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+}
+.container {
+    background: #1e1e1e;
+    padding: 25px;
+    border-radius: 10px;
+    width: 400px;
+    box-shadow: 0 0 20px rgba(0,0,0,0.5);
+}
+input, button {
+    width: 100%;
+    padding: 10px;
+    margin-top: 10px;
+    border-radius: 6px;
+    border: none;
+}
+input {
+    background: #2c2c2c;
+    color: white;
+}
+button {
+    background: #4CAF50;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+}
+button:hover {
+    background: #45a049;
+}
+#status {
+    margin-top: 15px;
+}
+</style>
 </head>
 <body>
-  <h1>Play a stream after N minutes</h1>
 
-  <label for="streamUrl">Stream URL (HLS .m3u8 / DASH .mpd / MP4 / MP3)</label>
-  <input id="streamUrl" type="url" placeholder="https://.../master.m3u8" required />
-  <small>
-    If this is HLS (<code>.m3u8</code>), Chrome/Firefox need HLS.js (included). If it’s DASH (<code>.mpd</code>), we use dash.js (included).
-  </small>
+<div class="container">
+    <h2>Delayed Page Audio Player</h2>
 
-  <label for="minutes">Time (minutes)</label>
-  <input id="minutes" type="number" min="0.01" step="0.01" placeholder="e.g., 2" required />
+    <label>Page URL:</label>
+    <input type="text" id="pageUrl" placeholder="https://example.com/page">
 
-  <div class="row">
-    <button id="startBtn">Start</button>
-    <button id="cancelBtn" disabled>Cancel</button>
-  </div>
+    <label>Delay (seconds):</label>
+    <input type="number" id="delay" placeholder="30">
 
-  <div id="status">
-    <div><strong>Status:</strong> <span id="statusText">Idle</span></div>
-    <div><small id="countdown"></small></div>
-    <div><small id="hint"></small></div>
-  </div>
+    <button onclick="start()">Start</button>
 
-  <video id="player" controls playsinline></video>
+    <div id="status"></div>
+    <audio id="player"></audio>
+</div>
 
-  <script>
-    let timeoutId = null;
-    let intervalId = null;
-    let endTimeMs = 0;
+<script>
+let countdownInterval;
 
-    let hls = null;
-    let dashPlayer = null;
+async function extractAudioUrl(pageUrl) {
+    try {
+        const response = await fetch(pageUrl);
+        const text = await response.text();
 
-    const streamUrlEl = document.getElementById("streamUrl");
-    const minutesEl = document.getElementById("minutes");
-    const startBtn = document.getElementById("startBtn");
-    const cancelBtn = document.getElementById("cancelBtn");
-    const statusText = document.getElementById("statusText");
-    const countdown = document.getElementById("countdown");
-    const hint = document.getElementById("hint");
-    const video = document.getElementById("player");
-
-    function normalizeUrl(raw) {
-      const t = (raw || "").trim();
-      if (!t) return "";
-      if (!/^https?:\/\//i.test(t)) return "https://" + t;
-      return t;
-    }
-
-    function clearTimers() {
-      if (timeoutId) clearTimeout(timeoutId);
-      if (intervalId) clearInterval(intervalId);
-      timeoutId = null;
-      intervalId = null;
-    }
-
-    function resetEngines() {
-      // stop playback
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-
-      // destroy hls.js
-      if (hls) {
-        try { hls.destroy(); } catch {}
-        hls = null;
-      }
-      // destroy dash.js
-      if (dashPlayer) {
-        try { dashPlayer.reset(); } catch {}
-        dashPlayer = null;
-      }
-    }
-
-    function setIdle() {
-      clearTimers();
-      resetEngines();
-      statusText.textContent = "Idle";
-      countdown.textContent = "";
-      hint.textContent = "";
-      startBtn.disabled = false;
-      cancelBtn.disabled = true;
-    }
-
-    function formatRemaining(ms) {
-      const totalSec = Math.max(0, Math.ceil(ms / 1000));
-      const m = Math.floor(totalSec / 60);
-      const s = totalSec % 60;
-      return `${m}:${String(s).padStart(2, "0")}`;
-    }
-
-    function classify(url) {
-      const u = url.toLowerCase().split("?")[0].split("#")[0];
-      if (u.endsWith(".m3u8")) return "hls";
-      if (u.endsWith(".mpd")) return "dash";
-      if (/\.(mp4|webm|ogg|mov|m4v)$/i.test(u)) return "video";
-      if (/\.(mp3|wav|aac|m4a|flac|oga|opus)$/i.test(u)) return "audio";
-      return "unknown";
-    }
-
-    async function tryPlay() {
-      try {
-        await video.play();
-        hint.textContent = "";
-      } catch (e) {
-        hint.textContent = "Autoplay blocked. Click the play button on the player.";
-      }
-    }
-
-    function attachHLS(url) {
-      // Safari can often do HLS without hls.js
-      if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = url;
-        return;
-      }
-      if (!window.Hls || !Hls.isSupported()) {
-        throw new Error("HLS not supported in this browser (and Hls.js not available).");
-      }
-      hls = new Hls({
-        // If CORS is an issue, this still won’t bypass it — but we can surface errors.
-        // You can tweak lowLatencyMode if needed:
-        // lowLatencyMode: true
-      });
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        // Helpful diagnostics
-        console.error("HLS error:", data);
-        statusText.textContent = "HLS error: " + (data?.details || data?.type || "unknown");
-        hint.textContent = "Common cause: CORS blocked playlist/segments, or URL needs cookies/auth.";
-      });
-      hls.loadSource(url);
-      hls.attachMedia(video);
-    }
-
-    function attachDASH(url) {
-      if (!window.dashjs) throw new Error("dash.js not available.");
-      dashPlayer = dashjs.MediaPlayer().create();
-      dashPlayer.on("error", (e) => {
-        console.error("DASH error:", e);
-        statusText.textContent = "DASH error (see console)";
-        hint.textContent = "Common cause: CORS blocked manifest/segments, or URL needs cookies/auth.";
-      });
-      dashPlayer.initialize(video, url, false);
-    }
-
-    async function playStream(url) {
-      resetEngines();
-
-      const kind = classify(url);
-      statusText.textContent = `Loading (${kind}): ${url}`;
-      hint.textContent = "";
-
-      // Important: many servers require HTTPS + correct CORS headers
-      // We can only set crossOrigin for decoders; it won't bypass CORS on playlists/segments.
-      video.crossOrigin = "anonymous";
-
-      if (kind === "hls") {
-        attachHLS(url);
-      } else if (kind === "dash") {
-        attachDASH(url);
-      } else {
-        // normal direct media
-        video.src = url;
-      }
-
-      // Wait a bit for manifest attach
-      await new Promise(r => setTimeout(r, 300));
-      statusText.textContent = "Attempting playback…";
-      await tryPlay();
-      statusText.textContent = "Playing (or ready).";
-    }
-
-    startBtn.addEventListener("click", async () => {
-      clearTimers();
-
-      const url = normalizeUrl(streamUrlEl.value);
-      const minutes = Number(minutesEl.value);
-
-      if (!url) return alert("Enter a stream URL.");
-      if (!Number.isFinite(minutes) || minutes <= 0) return alert("Enter minutes > 0.");
-
-      const delayMs = minutes * 60 * 1000;
-      endTimeMs = Date.now() + delayMs;
-
-      startBtn.disabled = true;
-      cancelBtn.disabled = false;
-
-      statusText.textContent = `Scheduled: will play after ${minutes} min`;
-      hint.textContent = "";
-      countdown.textContent = "";
-
-      intervalId = setInterval(() => {
-        countdown.textContent = `Starting in ${formatRemaining(endTimeMs - Date.now())} (mm:ss)`;
-      }, 250);
-
-      timeoutId = setTimeout(async () => {
-        clearTimers();
-        countdown.textContent = "";
-
-        try {
-          await playStream(url);
-        } catch (e) {
-          console.error(e);
-          statusText.textContent = "Failed to start: " + (e?.message || "unknown error");
-          hint.textContent =
-            "If this is HLS/DASH, CORS or auth is the #1 cause. Also try running from an HTTPS server (not file://).";
-          startBtn.disabled = false;
-          cancelBtn.disabled = true;
+        // Find first .m4a link in page source
+        const match = text.match(/https:\/\/[^"]+\.m4a/);
+        if (match) {
+            return match[0];
         }
-      }, delayMs);
-    });
+        return null;
+    } catch (err) {
+        return null;
+    }
+}
 
-    cancelBtn.addEventListener("click", setIdle);
+async function start() {
+    const pageUrl = document.getElementById("pageUrl").value;
+    const delaySeconds = parseInt(document.getElementById("delay").value);
+    const status = document.getElementById("status");
 
-    setIdle();
-  </script>
+    if (!pageUrl || !delaySeconds || delaySeconds <= 0) {
+        alert("Enter valid URL and delay.");
+        return;
+    }
+
+    status.innerText = "Extracting audio link...";
+
+    const audioUrl = await extractAudioUrl(pageUrl);
+
+    if (!audioUrl) {
+        status.innerText = "Failed to extract audio (likely blocked by browser security).";
+        return;
+    }
+
+    const player = document.getElementById("player");
+    player.src = audioUrl;
+
+    let timeLeft = delaySeconds;
+    status.innerText = `Playing in ${timeLeft} seconds...`;
+
+    clearInterval(countdownInterval);
+
+    countdownInterval = setInterval(() => {
+        timeLeft--;
+        status.innerText = `Playing in ${timeLeft} seconds...`;
+
+        if (timeLeft <= 0) {
+            clearInterval(countdownInterval);
+            status.innerText = "Playing now!";
+            player.play().catch(() => {
+                alert("Click anywhere on the page first, then try again.");
+            });
+        }
+    }, 1000);
+}
+</script>
+
 </body>
 </html>
